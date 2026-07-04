@@ -86,12 +86,17 @@ export interface Stroke {
   r: number // bán kính, chuẩn hoá theo cạnh dài của ảnh
 }
 
-export interface Local {
-  amount: number // -100..100: độ sáng cộng thêm trong vùng tô
+export type BrushType = 'brighten' | 'blush'
+
+// Một "lớp cọ" = một loại chỉnh cục bộ áp lên vùng đã tô.
+export interface BrushLayer {
+  type: BrushType
+  amount: number // brighten: -100..100 (gamma lift) | blush: 0..100 (độ đậm)
+  color?: string // dùng cho blush (má hồng)
   strokes: Stroke[]
 }
 
-export const NO_LOCAL: Local = { amount: 0, strokes: [] }
+export const NO_LAYERS: BrushLayer[] = []
 
 // Đường cong nâng vùng tối (shadow lift) bằng gamma. amount: -100..100.
 // gamma < 1 -> kéo vùng tối sáng lên mạnh, vùng sáng gần như giữ nguyên.
@@ -170,12 +175,34 @@ function getLiftedLayer(graded: HTMLCanvasElement, gKey: string, amount: number)
   return c
 }
 
+// Dựng mặt nạ vùng tô (trắng = áp dụng, viền mềm) từ danh sách nét cọ.
+function buildMask(strokes: Stroke[], w: number, h: number): HTMLCanvasElement {
+  const mask = document.createElement('canvas')
+  mask.width = w
+  mask.height = h
+  const mctx = mask.getContext('2d')!
+  const longestPx = Math.max(w, h)
+  for (const s of strokes) {
+    const cx = s.u * w
+    const cy = s.v * h
+    const rad = Math.max(1, s.r * longestPx)
+    const g = mctx.createRadialGradient(cx, cy, rad * 0.35, cx, cy, rad)
+    g.addColorStop(0, 'rgba(255,255,255,1)')
+    g.addColorStop(1, 'rgba(255,255,255,0)')
+    mctx.fillStyle = g
+    mctx.beginPath()
+    mctx.arc(cx, cy, rad, 0, Math.PI * 2)
+    mctx.fill()
+  }
+  return mask
+}
+
 // Dựng ảnh đã chỉnh trong "không gian ảnh gốc" (chưa xoay), đã nướng sẵn cả
-// grade (filter + LUT) lẫn vùng tô sáng cục bộ. Trả về canvas kích thước w×h.
+// grade (filter + LUT) lẫn các lớp cọ cục bộ. Trả về canvas kích thước w×h.
 function renderImageSpace(
   img: HTMLImageElement,
   grade: Grade,
-  local: Local,
+  layers: BrushLayer[],
   maxSize: number,
 ): HTMLCanvasElement {
   const longest = Math.max(img.naturalWidth, img.naturalHeight)
@@ -190,53 +217,56 @@ function renderImageSpace(
   const bctx = base.getContext('2d')!
   bctx.drawImage(graded, 0, 0)
 
-  if (local.amount !== 0 && local.strokes.length > 0) {
-    // Lớp ảnh đã nâng vùng tối (gamma lift) — dựng từ lớp graded, có cache
-    const bright = document.createElement('canvas')
-    bright.width = w
-    bright.height = h
-    const brctx = bright.getContext('2d')!
-    brctx.drawImage(getLiftedLayer(graded, `${img.src}|${gradeKey(grade)}|${w}x${h}`, local.amount), 0, 0)
+  for (const layer of layers) {
+    if (layer.strokes.length === 0) continue
+    if (layer.type === 'brighten' && layer.amount === 0) continue
+    if (layer.type === 'blush' && layer.amount <= 0) continue
 
-    // Mặt nạ vùng tô (trắng = áp dụng, viền mềm)
-    const mask = document.createElement('canvas')
-    mask.width = w
-    mask.height = h
-    const mctx = mask.getContext('2d')!
-    const longestPx = Math.max(w, h)
-    for (const s of local.strokes) {
-      const cx = s.u * w
-      const cy = s.v * h
-      const rad = Math.max(1, s.r * longestPx)
-      const g = mctx.createRadialGradient(cx, cy, rad * 0.35, cx, cy, rad)
-      g.addColorStop(0, 'rgba(255,255,255,1)')
-      g.addColorStop(1, 'rgba(255,255,255,0)')
-      mctx.fillStyle = g
-      mctx.beginPath()
-      mctx.arc(cx, cy, rad, 0, Math.PI * 2)
-      mctx.fill()
+    const mask = buildMask(layer.strokes, w, h)
+
+    if (layer.type === 'brighten') {
+      // Lớp gamma lift, chỉ giữ ở vùng mask rồi chồng lên nền
+      const bright = document.createElement('canvas')
+      bright.width = w
+      bright.height = h
+      const brctx = bright.getContext('2d')!
+      brctx.drawImage(getLiftedLayer(graded, `${img.src}|${gradeKey(grade)}|${w}x${h}`, layer.amount), 0, 0)
+      brctx.globalCompositeOperation = 'destination-in'
+      brctx.drawImage(mask, 0, 0)
+      bctx.drawImage(bright, 0, 0)
+    } else if (layer.type === 'blush') {
+      // Lớp màu má hồng, phủ mềm bằng blend soft-light
+      const tint = document.createElement('canvas')
+      tint.width = w
+      tint.height = h
+      const tctx = tint.getContext('2d')!
+      tctx.fillStyle = layer.color || '#ff6b8a'
+      tctx.fillRect(0, 0, w, h)
+      tctx.globalCompositeOperation = 'destination-in'
+      tctx.drawImage(mask, 0, 0)
+
+      bctx.save()
+      bctx.globalCompositeOperation = 'soft-light'
+      bctx.globalAlpha = Math.min(1, (layer.amount / 100) * 0.85)
+      bctx.drawImage(tint, 0, 0)
+      bctx.restore()
     }
-
-    // Chỉ giữ lớp sáng ở nơi có mặt nạ, rồi chồng lên ảnh nền
-    brctx.globalCompositeOperation = 'destination-in'
-    brctx.drawImage(mask, 0, 0)
-    bctx.drawImage(bright, 0, 0)
   }
 
   return base
 }
 
-// Vẽ ảnh lên canvas với filter + vùng sáng cục bộ + xoay/lật.
+// Vẽ ảnh lên canvas với filter + các lớp cọ cục bộ + xoay/lật.
 // Dùng cho cả preview (maxSize nhỏ) lẫn export (maxSize = ảnh gốc).
 export function drawToCanvas(
   canvas: HTMLCanvasElement,
   img: HTMLImageElement,
   grade: Grade,
   transform: Transform,
-  local: Local = NO_LOCAL,
+  layers: BrushLayer[] = NO_LAYERS,
   maxSize = Infinity,
 ): void {
-  const src = renderImageSpace(img, grade, local, maxSize)
+  const src = renderImageSpace(img, grade, layers, maxSize)
   const w = src.width
   const h = src.height
 

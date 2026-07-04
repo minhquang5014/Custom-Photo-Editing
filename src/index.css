@@ -221,6 +221,21 @@ input[type='range']::-moz-range-thumb {
   transition: opacity .12s ease;
   z-index: 50;
 }
+.brush-ring.blush { border-color: #ff6b8a; }
+.brush-ring.brighten { border-color: #ffe08a; }
+
+/* Bảng màu má hồng */
+.swatches { display: flex; gap: 10px; margin-bottom: 14px; }
+.swatch {
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  cursor: pointer;
+  padding: 0;
+  transition: transform .08s ease, border-color .12s ease;
+}
+.swatch:active { transform: scale(0.9); }
+.swatch.active { border-color: #fff; box-shadow: 0 0 0 2px var(--accent); }
 
 /* ---- Mobile ---- */
 @media (max-width: 820px) {

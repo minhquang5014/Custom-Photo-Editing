@@ -3,13 +3,14 @@ import {
   PRESETS,
   DEFAULT_ADJ,
   DEFAULT_TRANSFORM,
-  NO_LOCAL,
+  NO_LAYERS,
   buildFilter,
   drawToCanvas,
   screenToNormalized,
   type Adjustments,
+  type BrushLayer,
+  type BrushType,
   type Grade,
-  type Local,
   type Stroke,
   type Transform,
 } from './filters'
@@ -25,6 +26,15 @@ const SLIDERS: { key: keyof Adjustments; label: string; min: number; max: number
   { key: 'blur', label: 'Làm mờ', min: 0, max: 10, center: 0 },
 ]
 
+const BLUSH_COLORS = [
+  { name: 'Hồng đào', hex: '#ff6b8a' },
+  { name: 'Cam san hô', hex: '#ff8f6b' },
+  { name: 'Đỏ hồng', hex: '#ff4d6d' },
+  { name: 'Hồng nhạt', hex: '#f0a5b8' },
+]
+
+type Tool = 'none' | BrushType
+
 export default function App() {
   const [img, setImg] = useState<HTMLImageElement | null>(null)
   const [fileName, setFileName] = useState('anh')
@@ -37,11 +47,13 @@ export default function App() {
   const [lutIntensity, setLutIntensity] = useState(100)
   const [importedLuts, setImportedLuts] = useState<LutMeta[]>([])
 
-  // Cọ tô sáng cục bộ
-  const [brushMode, setBrushMode] = useState(false)
-  const [localAmount, setLocalAmount] = useState(45)
+  // Cọ cục bộ đa công cụ
+  const [tool, setTool] = useState<Tool>('none')
   const [brushSize, setBrushSize] = useState(14)
-  const strokesRef = useRef<Stroke[]>([])
+  const [localAmount, setLocalAmount] = useState(45) // tô sáng
+  const [blushOpacity, setBlushOpacity] = useState(55) // má hồng
+  const [blushColor, setBlushColor] = useState(BLUSH_COLORS[0].hex)
+  const strokesRef = useRef<Record<BrushType, Stroke[]>>({ brighten: [], blush: [] })
   const [strokeCount, setStrokeCount] = useState(0)
   const paintingRef = useRef(false)
 
@@ -58,15 +70,18 @@ export default function App() {
     [preset, adj, lutId, lutIntensity],
   )
 
-  const currentLocal = useCallback(
-    (): Local => ({ amount: localAmount, strokes: strokesRef.current }),
-    [localAmount],
+  const currentLayers = useCallback(
+    (): BrushLayer[] => [
+      { type: 'brighten', amount: localAmount, strokes: strokesRef.current.brighten },
+      { type: 'blush', amount: blushOpacity, color: blushColor, strokes: strokesRef.current.blush },
+    ],
+    [localAmount, blushOpacity, blushColor],
   )
 
   const drawPreview = useCallback(() => {
     if (!img || !canvasRef.current) return
-    drawToCanvas(canvasRef.current, img, grade, transform, currentLocal(), PREVIEW_MAX)
-  }, [img, grade, transform, currentLocal])
+    drawToCanvas(canvasRef.current, img, grade, transform, currentLayers(), PREVIEW_MAX)
+  }, [img, grade, transform, currentLayers])
 
   useEffect(() => {
     drawPreview()
@@ -79,7 +94,7 @@ export default function App() {
       const c = thumbRefs.current[p.id]
       if (c) {
         drawToCanvas(c, img, { filter: buildFilter(p, DEFAULT_ADJ), lutId: 'none', lutIntensity: 1 },
-          DEFAULT_TRANSFORM, NO_LOCAL, 140)
+          DEFAULT_TRANSFORM, NO_LAYERS, 140)
       }
     }
   }, [img])
@@ -91,7 +106,7 @@ export default function App() {
       const c = lutThumbRefs.current[l.id]
       if (c) {
         drawToCanvas(c, img, { filter: 'none', lutId: l.id, lutIntensity: 1 },
-          DEFAULT_TRANSFORM, NO_LOCAL, 140)
+          DEFAULT_TRANSFORM, NO_LAYERS, 140)
       }
     }
   }, [img, allLuts])
@@ -102,7 +117,7 @@ export default function App() {
     const url = URL.createObjectURL(file)
     const image = new Image()
     image.onload = () => {
-      strokesRef.current = []
+      strokesRef.current = { brighten: [], blush: [] }
       setStrokeCount(0)
       setImg(image)
       setPresetId('original')
@@ -110,7 +125,7 @@ export default function App() {
       setLutIntensity(100)
       setAdj({ ...DEFAULT_ADJ })
       setTransform({ ...DEFAULT_TRANSFORM })
-      setBrushMode(false)
+      setTool('none')
       URL.revokeObjectURL(url)
     }
     image.src = url
@@ -152,23 +167,24 @@ export default function App() {
     setLutId('none')
     setLutIntensity(100)
     setTransform({ ...DEFAULT_TRANSFORM })
-    strokesRef.current = []
-    setStrokeCount(0)
+    strokesRef.current = { brighten: [], blush: [] }
+    setStrokeCount((n) => n + 1)
   }
 
-  const clearBrush = () => {
-    strokesRef.current = []
+  const clearTool = (t: BrushType) => {
+    strokesRef.current[t] = []
     setStrokeCount((n) => n + 1)
   }
 
   // ---- Cọ tô ----
   const addStroke = (e: React.PointerEvent) => {
+    if (tool === 'none') return
     const canvas = canvasRef.current!
     const rect = canvas.getBoundingClientRect()
     const px = ((e.clientX - rect.left) / rect.width) * canvas.width
     const py = ((e.clientY - rect.top) / rect.height) * canvas.height
     const { u, v } = screenToNormalized(px, py, canvas.width, canvas.height, transform)
-    strokesRef.current.push({ u, v, r: brushSize / 100 })
+    strokesRef.current[tool].push({ u, v, r: brushSize / 100 })
     drawPreview()
   }
 
@@ -187,13 +203,13 @@ export default function App() {
   }
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (!brushMode) return
+    if (tool === 'none') return
     e.currentTarget.setPointerCapture(e.pointerId)
     paintingRef.current = true
     addStroke(e)
   }
   const onPointerMove = (e: React.PointerEvent) => {
-    if (!brushMode) return
+    if (tool === 'none') return
     moveRing(e)
     if (paintingRef.current) addStroke(e)
   }
@@ -206,7 +222,7 @@ export default function App() {
   const download = () => {
     if (!img) return
     const canvas = document.createElement('canvas')
-    drawToCanvas(canvas, img, grade, transform, currentLocal()) // full-res
+    drawToCanvas(canvas, img, grade, transform, currentLayers()) // full-res
     canvas.toBlob(
       (blob) => {
         if (!blob) return
@@ -221,6 +237,8 @@ export default function App() {
       0.92,
     )
   }
+
+  const toggleTool = (t: BrushType) => setTool((cur) => (cur === t ? 'none' : t))
 
   return (
     <div className="app">
@@ -248,7 +266,7 @@ export default function App() {
           <section className="stage">
             <canvas
               ref={canvasRef}
-              className={`preview ${brushMode ? 'painting' : ''}`}
+              className={`preview ${tool !== 'none' ? 'painting' : ''}`}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={onPointerUp}
@@ -257,7 +275,7 @@ export default function App() {
                 if (ringRef.current) ringRef.current.style.opacity = '0'
               }}
             />
-            <div ref={ringRef} className="brush-ring" />
+            <div ref={ringRef} className={`brush-ring ${tool}`} />
           </section>
 
           <aside className="panel">
@@ -308,14 +326,23 @@ export default function App() {
             </div>
 
             <div className="panel-block">
-              <div className="panel-label">Chỉnh sáng vùng 🖌️</div>
-              <button
-                className={`btn full ${brushMode ? 'primary' : 'ghost'}`}
-                onClick={() => setBrushMode((b) => !b)}
-              >
-                {brushMode ? 'Đang bật — quét lên ảnh' : 'Bật cọ tô sáng'}
-              </button>
-              {brushMode && (
+              <div className="panel-label">Cọ chỉnh vùng</div>
+              <div className="tools">
+                <button
+                  className={`btn tool ${tool === 'brighten' ? 'primary' : ''}`}
+                  onClick={() => toggleTool('brighten')}
+                >
+                  ☀️ Tô sáng
+                </button>
+                <button
+                  className={`btn tool ${tool === 'blush' ? 'primary' : ''}`}
+                  onClick={() => toggleTool('blush')}
+                >
+                  🌸 Má hồng
+                </button>
+              </div>
+
+              {tool === 'brighten' && (
                 <div className="brush-controls">
                   <div className="slider-row">
                     <div className="slider-head">
@@ -325,15 +352,34 @@ export default function App() {
                     <input type="range" min={-100} max={100} value={localAmount}
                       onChange={(e) => setLocalAmount(Number(e.target.value))} />
                   </div>
+                  <BrushSizeRow value={brushSize} onChange={setBrushSize} />
+                  <button className="btn ghost full" onClick={() => clearTool('brighten')}>Xoá vùng tô sáng</button>
+                </div>
+              )}
+
+              {tool === 'blush' && (
+                <div className="brush-controls">
+                  <div className="swatches">
+                    {BLUSH_COLORS.map((c) => (
+                      <button
+                        key={c.hex}
+                        title={c.name}
+                        className={`swatch ${blushColor === c.hex ? 'active' : ''}`}
+                        style={{ background: c.hex }}
+                        onClick={() => setBlushColor(c.hex)}
+                      />
+                    ))}
+                  </div>
                   <div className="slider-row">
                     <div className="slider-head">
-                      <span>Cỡ cọ</span>
-                      <span className="slider-val">{brushSize}</span>
+                      <span>Độ đậm má hồng</span>
+                      <span className="slider-val">{blushOpacity}</span>
                     </div>
-                    <input type="range" min={4} max={40} value={brushSize}
-                      onChange={(e) => setBrushSize(Number(e.target.value))} />
+                    <input type="range" min={0} max={100} value={blushOpacity}
+                      onChange={(e) => setBlushOpacity(Number(e.target.value))} />
                   </div>
-                  <button className="btn ghost full" onClick={clearBrush}>Xoá vùng đã tô</button>
+                  <BrushSizeRow value={brushSize} onChange={setBrushSize} />
+                  <button className="btn ghost full" onClick={() => clearTool('blush')}>Xoá má hồng</button>
                 </div>
               )}
             </div>
@@ -375,6 +421,18 @@ export default function App() {
           </aside>
         </main>
       )}
+    </div>
+  )
+}
+
+function BrushSizeRow({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  return (
+    <div className="slider-row">
+      <div className="slider-head">
+        <span>Cỡ cọ</span>
+        <span className="slider-val">{value}</span>
+      </div>
+      <input type="range" min={4} max={40} value={value} onChange={(e) => onChange(Number(e.target.value))} />
     </div>
   )
 }
